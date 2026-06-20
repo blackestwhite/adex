@@ -3,6 +3,8 @@ package workspace
 import (
 	"strings"
 	"testing"
+
+	"ade-x/internal/intel"
 )
 
 func TestChunkDocumentsStableID(t *testing.T) {
@@ -39,33 +41,33 @@ func TestChunkTextOverlaps(t *testing.T) {
 }
 
 func TestExtractSymbolsGo(t *testing.T) {
-	symbols := ExtractSymbols("main.go", `package main
+	result := intel.Analyze("main.go", `package main
 type App struct{}
 func main(){}
 func (a *App) Run(){}
 `)
-	want := map[string]bool{"type:App": true, "func:main": true, "method:App.Run": true}
-	for _, symbol := range symbols {
+	want := map[string]bool{"type:App": true, "func:main": true, "method:Run": true}
+	for _, symbol := range result.Symbols {
 		delete(want, symbol)
 	}
 	if len(want) != 0 {
-		t.Fatalf("missing symbols: %+v from %+v", want, symbols)
+		t.Fatalf("missing symbols: %+v from %+v", want, result.Symbols)
 	}
 }
 
 func TestExtractImportsGo(t *testing.T) {
-	imports := ExtractImports("main.go", `package main
+	result := intel.Analyze("main.go", `package main
 import (
 	"fmt"
 	"net/http"
 )
 `)
 	want := map[string]bool{"fmt": true, "net/http": true}
-	for _, imported := range imports {
+	for _, imported := range result.Imports {
 		delete(want, imported)
 	}
 	if len(want) != 0 {
-		t.Fatalf("missing imports: %+v from %+v", want, imports)
+		t.Fatalf("missing imports: %+v from %+v", want, result.Imports)
 	}
 }
 

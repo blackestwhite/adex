@@ -15,7 +15,8 @@ docker compose --profile graph up -d neo4j
 go test ./...
 go run ./cmd/adex doctor
 go run ./cmd/adex graph-doctor
-go run ./cmd/adex index -root . -chunk-overlap-bytes 600
+go run ./cmd/adex index -root . -full -chunk-overlap-bytes 600
+go run ./cmd/adex watch-index -root .
 go run ./cmd/adex graph-index -root .
 go run ./cmd/adex search "where is qdrant used?"
 go run ./cmd/adex ask "explain the indexing flow"
@@ -27,7 +28,8 @@ go run ./cmd/adex fix "add a test for empty search query"
 ## Commands
 
 - `doctor`: checks Ollama chat, Ollama embeddings, and Qdrant.
-- `index`: scans repo text/code files, chunks them with overlap, embeds with Ollama, resets the Qdrant collection, then stores fresh vectors.
+- `index`: incrementally scans repo text/code files, chunks them with overlap, embeds changed files with Ollama, deletes stale vectors, and stores hashes in `.adex/index.sqlite`. Add `-full` to rebuild the collection.
+- `watch-index`: watches repo files and runs incremental indexing after a debounce.
 - `search`: semantic code search over indexed chunks.
 - `ask`: retrieves repo context and asks the local chat model. Add `--sources` to print retrieved chunks.
 - `patch`: retrieves repo context and asks for a unified diff.
@@ -64,3 +66,5 @@ go run ./cmd/adex graph-index -root .
 ```
 
 Current graph shape: `Repo -> CONTAINS -> File`, `File -> DEFINES -> Symbol`, `File -> IMPORTS -> Package`.
+
+Code intelligence uses Tree-sitter for Go and JavaScript/TypeScript symbols, with Go parser fallback for imports/symbols. Incremental indexing uses SQLite file hashes plus Qdrant path deletes/upserts.

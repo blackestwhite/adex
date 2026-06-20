@@ -4,16 +4,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"ade-x/internal/intel"
 )
 
 const DefaultMaxFileBytes = 512 * 1024
@@ -26,6 +24,7 @@ type Document struct {
 	Language string
 	Symbols  []string
 	Imports  []string
+	Engine   string
 }
 
 func Collect(root string, maxFileBytes int64) ([]Document, error) {
@@ -74,14 +73,16 @@ func Collect(root string, maxFileBytes int64) ([]Document, error) {
 		rel = filepath.ToSlash(rel)
 		hashBytes := sha256.Sum256(raw)
 		content := string(raw)
+		analysis := intel.Analyze(rel, content)
 		docs = append(docs, Document{
 			Path:     path,
 			RelPath:  rel,
 			Content:  content,
 			Hash:     hex.EncodeToString(hashBytes[:]),
 			Language: languageFor(name),
-			Symbols:  ExtractSymbols(rel, content),
-			Imports:  ExtractImports(rel, content),
+			Symbols:  analysis.Symbols,
+			Imports:  analysis.Imports,
+			Engine:   analysis.Engine,
 		})
 		return nil
 	})
@@ -142,75 +143,4 @@ func languageFor(name string) string {
 		return strings.ToLower(name)
 	}
 	return ext
-}
-
-func ExtractImports(relPath string, content string) []string {
-	if filepath.Ext(relPath) != ".go" {
-		return nil
-	}
-	fileSet := token.NewFileSet()
-	file, err := parser.ParseFile(fileSet, relPath, content, parser.ImportsOnly)
-	if err != nil {
-		return nil
-	}
-	imports := make([]string, 0, len(file.Imports))
-	for _, spec := range file.Imports {
-		path, err := strconv.Unquote(spec.Path.Value)
-		if err != nil {
-			continue
-		}
-		imports = append(imports, path)
-	}
-	sort.Strings(imports)
-	return imports
-}
-
-func ExtractSymbols(relPath string, content string) []string {
-	if filepath.Ext(relPath) != ".go" {
-		return nil
-	}
-	fileSet := token.NewFileSet()
-	file, err := parser.ParseFile(fileSet, relPath, content, parser.SkipObjectResolution)
-	if err != nil {
-		return nil
-	}
-	var symbols []string
-	for _, decl := range file.Decls {
-		switch node := decl.(type) {
-		case *ast.FuncDecl:
-			if node.Recv != nil && len(node.Recv.List) > 0 {
-				symbols = append(symbols, "method:"+recvName(node.Recv.List[0].Type)+"."+node.Name.Name)
-			} else {
-				symbols = append(symbols, "func:"+node.Name.Name)
-			}
-		case *ast.GenDecl:
-			for _, spec := range node.Specs {
-				switch typed := spec.(type) {
-				case *ast.TypeSpec:
-					symbols = append(symbols, "type:"+typed.Name.Name)
-				case *ast.ValueSpec:
-					for _, name := range typed.Names {
-						if name.Name != "_" {
-							symbols = append(symbols, strings.ToLower(node.Tok.String())+":"+name.Name)
-						}
-					}
-				}
-			}
-		}
-	}
-	sort.Strings(symbols)
-	return symbols
-}
-
-func recvName(expr ast.Expr) string {
-	switch node := expr.(type) {
-	case *ast.Ident:
-		return node.Name
-	case *ast.StarExpr:
-		return recvName(node.X)
-	case *ast.SelectorExpr:
-		return node.Sel.Name
-	default:
-		return "receiver"
-	}
 }

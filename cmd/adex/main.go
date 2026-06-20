@@ -12,6 +12,7 @@ import (
 	"ade-x/internal/config"
 	"ade-x/internal/fix"
 	"ade-x/internal/graph"
+	"ade-x/internal/watcher"
 )
 
 func main() {
@@ -31,6 +32,8 @@ func run(args []string) error {
 		return runDoctor(args[1:])
 	case "index":
 		return runIndex(args[1:])
+	case "watch-index":
+		return runWatchIndex(args[1:])
 	case "search":
 		return runSearch(args[1:])
 	case "ask":
@@ -49,6 +52,37 @@ func run(args []string) error {
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
+}
+
+func runWatchIndex(args []string) error {
+	set := flag.NewFlagSet("watch-index", flag.ContinueOnError)
+	root := set.String("root", ".", "workspace root")
+	maxFileBytes := set.Int64("max-file-bytes", 512*1024, "max file bytes")
+	chunkBytes := set.Int("chunk-bytes", 3600, "chunk bytes")
+	chunkOverlapBytes := set.Int("chunk-overlap-bytes", 600, "chunk overlap bytes")
+	batchSize := set.Int("batch", agent.DefaultBatchSize, "embedding batch size")
+	debounce := set.Duration("debounce", 1200*time.Millisecond, "debounce duration")
+	if err := set.Parse(args); err != nil {
+		return err
+	}
+	rt, err := newRuntime()
+	if err != nil {
+		return err
+	}
+	fmt.Println("watching " + *root)
+	return watcher.Run(context.Background(), watcher.Options{
+		Root:     *root,
+		Debounce: *debounce,
+		OnChange: func(ctx context.Context, events []watcher.Event) error {
+			stats, err := rt.Index(ctx, *root, *maxFileBytes, *chunkBytes, *chunkOverlapBytes, *batchSize, false)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("indexed events=%d changed=%d skipped=%d deleted=%d chunks=%d embeddings=%d\n",
+				len(events), stats.Changed, stats.Skipped, stats.Deleted, stats.Chunks, stats.Embeddings)
+			return nil
+		},
+	})
 }
 
 func runFix(args []string) error {
@@ -165,6 +199,7 @@ func runIndex(args []string) error {
 	chunkBytes := set.Int("chunk-bytes", 3600, "chunk bytes")
 	chunkOverlapBytes := set.Int("chunk-overlap-bytes", 600, "chunk overlap bytes")
 	batchSize := set.Int("batch", agent.DefaultBatchSize, "embedding batch size")
+	full := set.Bool("full", false, "rebuild vector collection and index state")
 	timeout := set.Duration("timeout", 30*time.Minute, "deadline")
 	if err := set.Parse(args); err != nil {
 		return err
@@ -175,12 +210,12 @@ func runIndex(args []string) error {
 	if err != nil {
 		return err
 	}
-	stats, err := rt.Index(ctx, *root, *maxFileBytes, *chunkBytes, *chunkOverlapBytes, *batchSize)
+	stats, err := rt.Index(ctx, *root, *maxFileBytes, *chunkBytes, *chunkOverlapBytes, *batchSize, *full)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("indexed root=%s docs=%d chunks=%d embeddings=%d vector=%d collection=%s\n",
-		stats.Root, stats.Documents, stats.Chunks, stats.Embeddings, stats.VectorSize, stats.Collection)
+	fmt.Printf("indexed root=%s docs=%d changed=%d skipped=%d deleted=%d chunks=%d embeddings=%d vector=%d full=%t collection=%s\n",
+		stats.Root, stats.Documents, stats.Changed, stats.Skipped, stats.Deleted, stats.Chunks, stats.Embeddings, stats.VectorSize, stats.Full, stats.Collection)
 	return nil
 }
 
@@ -273,7 +308,8 @@ func usage() {
 
 commands:
   doctor                         check Ollama + Qdrant
-  index  [-root .]               embed repo chunks into Qdrant
+  index  [-root .]               incrementally embed repo chunks into Qdrant
+  watch-index [-root .]          watch files and incrementally reindex
   search [-k 8] <query>          semantic repo search
   ask    [-root .] [-k 2] <q>    RAG answer
   patch  [-root .] [-k 2] <task> ask model for unified diff

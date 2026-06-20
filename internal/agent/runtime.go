@@ -11,6 +11,7 @@ import (
 
 	"ade-x/internal/config"
 	"ade-x/internal/graph"
+	"ade-x/internal/indexstate"
 	"ade-x/internal/instructions"
 	"ade-x/internal/ollama"
 	"ade-x/internal/qdrant"
@@ -39,6 +40,10 @@ type IndexStats struct {
 	Collection  string
 	VectorSize  int
 	Instruction int
+	Changed     int
+	Deleted     int
+	Skipped     int
+	Full        bool
 }
 
 type RetrievedChunk struct {
@@ -47,6 +52,7 @@ type RetrievedChunk struct {
 	Hash       string
 	Language   string
 	Symbols    []string
+	Engine     string
 	ChunkIndex int
 	ChunkTotal int
 	Score      float64
@@ -92,26 +98,65 @@ func (r *Runtime) Doctor(ctx context.Context) error {
 	return nil
 }
 
-func (r *Runtime) Index(ctx context.Context, root string, maxFileBytes int64, chunkBytes int, chunkOverlapBytes int, batchSize int) (IndexStats, error) {
+func (r *Runtime) Index(ctx context.Context, root string, maxFileBytes int64, chunkBytes int, chunkOverlapBytes int, batchSize int, full bool) (IndexStats, error) {
 	if batchSize <= 0 {
 		batchSize = DefaultBatchSize
 	}
+	absRoot := mustAbs(root)
 	docs, err := workspace.Collect(root, maxFileBytes)
 	if err != nil {
 		return IndexStats{}, err
 	}
-	chunks := workspace.ChunkDocuments(docs, chunkBytes, chunkOverlapBytes)
+	store, err := indexstate.Open(absRoot)
+	if err != nil {
+		return IndexStats{}, err
+	}
+	defer store.Close()
+	previous, err := store.Load(ctx)
+	if err != nil {
+		return IndexStats{}, err
+	}
+	if len(previous) == 0 {
+		full = true
+	}
+	current := map[string]workspace.Document{}
+	for _, doc := range docs {
+		current[doc.RelPath] = doc
+	}
+	targetDocs, deleted := indexPlan(docs, previous, current, full)
+	chunks := workspace.ChunkDocuments(targetDocs, chunkBytes, chunkOverlapBytes)
 	stats := IndexStats{
-		Root:       mustAbs(root),
+		Root:       absRoot,
 		Documents:  len(docs),
 		Chunks:     len(chunks),
 		Collection: r.cfg.Collection,
+		Changed:    len(targetDocs),
+		Deleted:    len(deleted),
+		Skipped:    len(docs) - len(targetDocs),
+		Full:       full,
+	}
+	if full {
+		stats.Skipped = 0
 	}
 	if len(chunks) == 0 {
-		if err := r.memory.RecreateCollection(ctx, r.cfg.Collection, 1); err != nil {
-			return stats, err
+		if full {
+			if err := r.memory.RecreateCollection(ctx, r.cfg.Collection, 1); err != nil {
+				return stats, err
+			}
+			if err := store.Replace(ctx, fileStates(docs)); err != nil {
+				return stats, err
+			}
+			stats.VectorSize = 1
+			return stats, nil
 		}
-		stats.VectorSize = 1
+		if len(deleted) > 0 {
+			if err := r.memory.DeletePaths(ctx, r.cfg.Collection, deleted); err != nil {
+				return stats, err
+			}
+			if err := store.Apply(ctx, nil, deleted); err != nil {
+				return stats, err
+			}
+		}
 		return stats, nil
 	}
 
@@ -134,8 +179,18 @@ func (r *Runtime) Index(ctx context.Context, root string, maxFileBytes int64, ch
 		}
 		if stats.VectorSize == 0 {
 			stats.VectorSize = len(embed.Embeddings[0])
-			if err := r.memory.RecreateCollection(ctx, r.cfg.Collection, stats.VectorSize); err != nil {
-				return stats, err
+			if full {
+				if err := r.memory.RecreateCollection(ctx, r.cfg.Collection, stats.VectorSize); err != nil {
+					return stats, err
+				}
+			} else {
+				if err := r.memory.EnsureCollection(ctx, r.cfg.Collection, stats.VectorSize); err != nil {
+					return stats, err
+				}
+				paths := append(documentPaths(targetDocs), deleted...)
+				if err := r.memory.DeletePaths(ctx, r.cfg.Collection, paths); err != nil {
+					return stats, err
+				}
 			}
 		}
 		points := make([]qdrant.Point, 0, len(batch))
@@ -149,6 +204,7 @@ func (r *Runtime) Index(ctx context.Context, root string, maxFileBytes int64, ch
 					"hash":        chunk.Hash,
 					"language":    chunk.Language,
 					"symbols":     chunk.Symbols,
+					"engine":      chunk.Engine,
 					"chunk_index": chunk.ChunkIndex,
 					"chunk_total": chunk.ChunkTotal,
 					"kind":        "code",
@@ -160,7 +216,51 @@ func (r *Runtime) Index(ctx context.Context, root string, maxFileBytes int64, ch
 		}
 		stats.Embeddings += len(batch)
 	}
+	if full {
+		if err := store.Replace(ctx, fileStates(docs)); err != nil {
+			return stats, err
+		}
+	} else {
+		if err := store.Apply(ctx, fileStates(targetDocs), deleted); err != nil {
+			return stats, err
+		}
+	}
 	return stats, nil
+}
+
+func indexPlan(docs []workspace.Document, previous map[string]string, current map[string]workspace.Document, full bool) ([]workspace.Document, []string) {
+	if full {
+		return docs, nil
+	}
+	var changed []workspace.Document
+	for _, doc := range docs {
+		if previous[doc.RelPath] != doc.Hash {
+			changed = append(changed, doc)
+		}
+	}
+	var deleted []string
+	for path := range previous {
+		if _, ok := current[path]; !ok {
+			deleted = append(deleted, path)
+		}
+	}
+	return changed, deleted
+}
+
+func fileStates(docs []workspace.Document) []indexstate.FileState {
+	states := make([]indexstate.FileState, 0, len(docs))
+	for _, doc := range docs {
+		states = append(states, indexstate.FileState{Path: doc.RelPath, Hash: doc.Hash})
+	}
+	return states
+}
+
+func documentPaths(docs []workspace.Document) []string {
+	paths := make([]string, 0, len(docs))
+	for _, doc := range docs {
+		paths = append(paths, doc.RelPath)
+	}
+	return paths
 }
 
 func (r *Runtime) Search(ctx context.Context, query string, topK int) ([]RetrievedChunk, error) {
@@ -190,6 +290,7 @@ func (r *Runtime) Search(ctx context.Context, query string, topK int) ([]Retriev
 			Hash:       payloadString(result.Payload, "hash"),
 			Language:   payloadString(result.Payload, "language"),
 			Symbols:    payloadStrings(result.Payload, "symbols"),
+			Engine:     payloadString(result.Payload, "engine"),
 			ChunkIndex: payloadInt(result.Payload, "chunk_index"),
 			ChunkTotal: payloadInt(result.Payload, "chunk_total"),
 			Score:      result.Score,

@@ -127,3 +127,28 @@ func TestUpsertAndSearch(t *testing.T) {
 		t.Fatalf("unexpected results: %+v", results)
 	}
 }
+
+func TestDeletePaths(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/collections/code/points/delete" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := body["filter"]; !ok {
+			t.Fatalf("missing filter: %+v", body)
+		}
+		w.Write([]byte(`{"result":{"operation_id":1,"status":"completed"}}`))
+	}))
+	defer server.Close()
+
+	client, err := New(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.DeletePaths(context.Background(), "code", []string{"a.go", "b.go"}); err != nil {
+		t.Fatal(err)
+	}
+}

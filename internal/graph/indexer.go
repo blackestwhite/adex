@@ -56,13 +56,14 @@ func IndexWorkspace(ctx context.Context, client *Client, root string, maxFileByt
 		if err := add(`
 MERGE (r:Repo {root: $root})
 MERGE (f:File {repo: $root, path: $path})
-SET f.hash = $hash, f.language = $language
+SET f.hash = $hash, f.language = $language, f.engine = $engine
 MERGE (r)-[:CONTAINS]->(f)
 `, map[string]any{
 			"root":     absRoot,
 			"path":     doc.RelPath,
 			"hash":     doc.Hash,
 			"language": doc.Language,
+			"engine":   doc.Engine,
 		}); err != nil {
 			return stats, err
 		}

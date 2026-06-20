@@ -145,6 +145,33 @@ func (c *Client) Upsert(ctx context.Context, collection string, points []Point) 
 	return nil
 }
 
+func (c *Client) DeletePaths(ctx context.Context, collection string, paths []string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	values := make([]any, 0, len(paths))
+	for _, path := range paths {
+		values = append(values, path)
+	}
+	payload := map[string]any{
+		"filter": map[string]any{
+			"must": []any{
+				map[string]any{
+					"key": "path",
+					"match": map[string]any{
+						"any": values,
+					},
+				},
+			},
+		},
+	}
+	path := collectionPath(collection) + "/points/delete?wait=true"
+	if err := c.doJSON(ctx, http.MethodPost, path, payload, nil); err != nil {
+		return fmt.Errorf("delete points by path: %w", err)
+	}
+	return nil
+}
+
 func (c *Client) Search(ctx context.Context, collection string, vector []float64, limit int) ([]SearchResult, error) {
 	if len(vector) == 0 {
 		return nil, fmt.Errorf("query vector is empty")

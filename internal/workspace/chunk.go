@@ -19,6 +19,7 @@ type Chunk struct {
 	Hash       string
 	Language   string
 	Symbols    []string
+	Engine     string
 	ChunkIndex int
 	ChunkTotal int
 }
@@ -45,6 +46,7 @@ func ChunkDocuments(docs []Document, maxBytes int, overlapBytes int) []Chunk {
 				Hash:       doc.Hash,
 				Language:   doc.Language,
 				Symbols:    doc.Symbols,
+				Engine:     doc.Engine,
 				ChunkIndex: i,
 				ChunkTotal: total,
 			})
